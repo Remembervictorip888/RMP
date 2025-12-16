@@ -45,4 +45,4 @@ Please contact the project maintainers for contribution guidelines.
 
 ## License
 
-Copyright (c) 2025
+Copyright (c) 2026
