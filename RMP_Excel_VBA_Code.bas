@@ -1,5 +1,77 @@
 Option Explicit
 
+' =============================================================================
+' RMP EXCEL VBA PROCESSING ENGINE
+' =============================================================================
+'
+' PURPOSE: Process large insurance datasets in batches with modular helper functions
+'
+' AUTHOR: HKMC Budget Enhancement Team
+' VERSION: 2.0
+' LAST UPDATED: December 2025
+'
+' ------------------------------------------------------------------------------
+' DEVELOPER GUIDE - AVAILABLE FUNCTIONS FOR HELPER DEVELOPMENT
+' ------------------------------------------------------------------------------
+'
+' COLUMN MANAGEMENT FUNCTIONS:
+'   AddColumnIfNotExist(ws, colName)
+'     - Adds a new column with specified name if it doesn't exist
+'     - Usage: AddColumnIfNotExist myWorksheet, "NEW_COLUMN_NAME"
+'
+'   GetColumnIndex(ws, colName)
+'     - Gets the column index (number) for a given column name
+'     - Returns 0 if column doesn't exist
+'     - Usage: colIndex = GetColumnIndex(myWorksheet, "EXISTING_COLUMN")
+'
+' DATA ACCESS FUNCTIONS:
+'   NzLong(dataArray, row, col)
+'     - Safely converts array element to Long (returns 0 if invalid)
+'     - Usage: value = NzLong(myDataArray, rowIndex, columnIndex)
+'
+'   NzDouble(dataArray, row, col)
+'     - Safely converts array element to Double (returns 0# if invalid)
+'     - Usage: value = NzDouble(myDataArray, rowIndex, columnIndex)
+'
+'   NzString(dataArray, row, col)
+'     - Safely converts array element to String (returns "" if invalid)
+'     - Usage: value = NzString(myDataArray, rowIndex, columnIndex)
+'
+' ROW/COLUMN INFORMATION FUNCTIONS:
+'   GetLastRow(worksheet)
+'     - Gets the last row with data in the worksheet
+'     - Usage: lastRow = GetLastRow(myWorksheet)
+'
+'   GetLastColumn(worksheet)
+'     - Gets the last column with data in the worksheet
+'     - Usage: lastCol = GetLastColumn(myWorksheet)
+'
+' UTILITY FUNCTIONS:
+'   Log(message, optional type)
+'     - Logs a message with timestamp (types: INFO, WARNING, ERROR, SUCCESS)
+'     - Usage: Log "Processing completed", "SUCCESS"
+'
+' EXAMPLE HELPER FUNCTION TEMPLATE:
+'   Private Sub Helper_99_MyCustomFunction(ws As Worksheet)
+'       On Error GoTo ErrorHandler
+'       
+'       Dim lr As Long: lr = GetLastRow(ws)
+'       Dim myCol As Long: myCol = GetColumnIndex(ws, "MY_DATA_COLUMN")
+'       
+'       If myCol = 0 Then
+'           AddColumnIfNotExist ws, "NEW_RESULT_COLUMN"
+'           myCol = GetColumnIndex(ws, "NEW_RESULT_COLUMN")
+'       End If
+'       
+'       ' Your custom logic here
+'       
+'       Exit Sub
+'   ErrorHandler:
+'       Log "Helper_99_MyCustomFunction ERROR: " & Err.Description, "ERROR"
+'   End Sub
+'
+' ------------------------------------------------------------------------------
+
 ' --- CONFIGURATION ---
 Private Const LOG_PATH As String = "Log\"
 Private Const OUT_PATH As String = "Output\"
@@ -52,12 +124,102 @@ SafeExit:
 
 MainErr:
     Log "FATAL ERROR: " & Err.Description & " (Err# " & Err.Number & ")", "ERROR"
+    bSuccess = False
     Resume SafeExit
 End Sub
 
+' ==============================================================================
+' CORE UTILITY FUNCTIONS
+' ==============================================================================
+
+Private Sub InitializeGlobals()
+    Set g_FSO = CreateObject("Scripting.FileSystemObject")
+    Set g_HeaderMap = CreateObject("Scripting.Dictionary")
+    Set g_LookupData = CreateObject("Scripting.Dictionary")
+    Set g_RowIndex = CreateObject("Scripting.Dictionary")
+    Set g_colIndexDict = g_HeaderMap
+    
+    g_ProcessID = Format(Now, "yyyymmdd_hhmmss")
+    
+    If Not g_FSO.FolderExists(OUT_PATH) Then g_FSO.CreateFolder OUT_PATH
+    If Not g_FSO.FolderExists(LOG_PATH) Then g_FSO.CreateFolder LOG_PATH
+    
+    Dim logFile As String: logFile = LOG_PATH & "Run_" & g_ProcessID & ".txt"
+    Set g_LogStream = g_FSO.CreateTextFile(logFile, True)
+    
+    Log "Process ID: " & g_ProcessID
+    Log "Log file: " & logFile
+End Sub
+
+Private Sub CleanUpResources()
+    On Error Resume Next
+    If Not g_LogStream Is Nothing Then g_LogStream.Close
+    Set g_FSO = Nothing
+    Set g_HeaderMap = Nothing
+    Set g_LookupData = Nothing
+    Set g_RowIndex = Nothing
+    Set g_colIndexDict = Nothing
+    Set g_patternDict = Nothing
+    Set g_SourceWB = Nothing
+    Set g_SourceWS = Nothing
+    On Error GoTo 0
+End Sub
+
+Private Sub ToggleOptimization(bOn As Boolean)
+    With Application
+        .ScreenUpdating = Not bOn
+        .Calculation = IIf(bOn, xlCalculationManual, xlCalculationAutomatic)
+        .EnableEvents = Not bOn
+        .DisplayAlerts = Not bOn
+        .StatusBar = Not bOn
+    End With
+End Sub
+
+Private Sub Log(msg As String, Optional sType As String = "INFO")
+    Dim s As String: s = Format(Now, "hh:mm:ss") & " [" & sType & "] " & msg
+    If DEBUG_PRINT Then Debug.Print s
+    On Error GoTo ErrorHandler
+    If Not g_LogStream Is Nothing Then 
+        g_LogStream.WriteLine s
+    Else
+        ' Fallback to immediate window if log stream unavailable
+        Debug.Print s
+    End If
+    Exit Sub
+    
+ErrorHandler:
+    ' If we can't write to log, at least print to immediate window
+    Debug.Print "Logging Error: " & Err.Description & " - Message: " & s
+End Sub
+
+Private Function CalculateBatchSize(total As Long) As Long
+    Select Case total
+        Case Is > 10000: CalculateBatchSize = 3000
+        Case Is > 5000: CalculateBatchSize = 2000
+        Case Is > 2000: CalculateBatchSize = 1500
+        Case Is > 500: CalculateBatchSize = Application.Min(total, 1000)
+        Case Else: CalculateBatchSize = total
+    End Select
+End Function
+
+Private Function BrowseForFile() As String
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .Title = "Select Input File"
+        .Filters.Clear
+        .Filters.Add "Excel Files", "*.xlsx;*.xls;*.xlsm"
+        .Filters.Add "CSV Files", "*.csv"
+        .Filters.Add "All Files", "*.*"
+        If .Show = -1 Then BrowseForFile = .SelectedItems(1)
+    End With
+End Function
+
+' ==============================================================================
+' DATA LOADING FUNCTIONS
+' ==============================================================================
+
 ' =======LOAD SOURCE DATA - UNIVERSAL (CSV + EXCEL)=================
 Private Function LoadSourceData() As Boolean
-    On Error GoTo LoadErr
+    On Error GoTo ErrorHandler
     
     LoadSourceData = False
     
@@ -125,7 +287,7 @@ Private Function LoadSourceData() As Boolean
     LoadSourceData = True
     Exit Function
     
-LoadErr:
+ErrorHandler:
     Log "LoadSourceData ERROR: " & Err.Description & " (Err# " & Err.Number & ")", "ERROR"
     On Error Resume Next
     If Not g_SourceWB Is Nothing Then g_SourceWB.Close False
@@ -231,7 +393,7 @@ End Sub
 ' ==============================================================================
 ' ===========GetLastRow - ENHANCED FOR CSV COMPATIBILITY=============
 Public Function GetLastRow(ws As Worksheet) As Long
-    On Error Resume Next
+    On Error GoTo ErrorHandler
     
     If ws Is Nothing Then
         GetLastRow = 0
@@ -239,16 +401,16 @@ Public Function GetLastRow(ws As Worksheet) As Long
     End If
     
     ' Method 1: Column A (standard approach)
-    Dim lr1 As Long: lr1 = ws.Cells(ws.rows.count, 1).End(xlUp).row
+    Dim lr1 As Long: lr1 = ws.Cells(ws.Rows.count, 1).End(xlUp).Row
     
     ' Method 2: UsedRange (more reliable for CSV and modified files)
     Dim lr2 As Long: lr2 = 0
     If Not ws.UsedRange Is Nothing Then
-        lr2 = ws.UsedRange.row + ws.UsedRange.rows.count - 1
+        lr2 = ws.UsedRange.Row + ws.UsedRange.Rows.count - 1
     End If
     
     ' Method 3: Direct UsedRange.Rows.count
-    Dim lr3 As Long: lr3 = ws.UsedRange.rows.count
+    Dim lr3 As Long: lr3 = ws.UsedRange.Rows.count
     
     ' Method 4: Special handling for CSV - check if we have data beyond header
     Dim lr4 As Long: lr4 = 0
@@ -266,27 +428,30 @@ Public Function GetLastRow(ws As Worksheet) As Long
         Dim cell As Range
         Set cell = ws.Cells(2, 1)
         If Not IsEmpty(cell) And Not IsError(cell) Then
-            GetLastRow = ws.Cells(ws.rows.count, 1).End(xlUp).row
-            If GetLastRow < 1 Then GetLastRow = ws.UsedRange.rows.count
+            GetLastRow = ws.Cells(ws.Rows.count, 1).End(xlUp).Row
+            If GetLastRow < 1 Then GetLastRow = ws.UsedRange.Rows.count
         End If
     End If
     
     ' Ensure minimum 1 if data exists
     If GetLastRow < 1 Then
-        If ws.UsedRange.rows.count > 0 Then
-            GetLastRow = ws.UsedRange.rows.count
+        If ws.UsedRange.Rows.count > 0 Then
+            GetLastRow = ws.UsedRange.Rows.count
         Else
             GetLastRow = 1
         End If
     End If
     
-    On Error GoTo 0
+    Exit Function
+    
+ErrorHandler:
+    Log "GetLastRow ERROR: " & Err.Description, "ERROR"
+    GetLastRow = 1 ' Return safe default
 End Function
-
 
 ' ===========GetLastColumn - ROBUST DETECTION=============
 Private Function GetLastColumn(ws As Worksheet) As Long
-    On Error Resume Next
+    On Error GoTo ErrorHandler
     
     If ws Is Nothing Then
         GetLastColumn = 0
@@ -308,15 +473,22 @@ Private Function GetLastColumn(ws As Worksheet) As Long
     ' Ensure minimum 1
     If GetLastColumn < 1 Then GetLastColumn = 1
     
-    On Error GoTo 0
+    Exit Function
+    
+ErrorHandler:
+    Log "GetLastColumn ERROR: " & Err.Description, "ERROR"
+    GetLastColumn = 1 ' Return safe default
 End Function
 
+' ==============================================================================
+' BATCH PROCESSING FUNCTIONS
+' ==============================================================================
 
 ' ==============================================================================
 ' PROCESS BATCHES - OPTIMIZED
 ' ==============================================================================
 Private Sub ProcessBatches()
-    On Error GoTo ProcessErr
+    On Error GoTo ErrorHandler
     
     ' Get distinct MI_NOs
     Dim colUnique As Collection: Set colUnique = GetDistinctMI_NOs()
@@ -341,7 +513,7 @@ Private Sub ProcessBatches()
     Log "All " & totalBatches & " batches processed"
     Exit Sub
     
-ProcessErr:
+ErrorHandler:
     Log "ProcessBatches ERROR: " & Err.Description, "ERROR"
     Err.Raise Err.Number, "ProcessBatches", Err.Description
 End Sub
@@ -371,7 +543,7 @@ End Function
 
 ' Loop through batches and trigger ProcessSingleBatch
 Private Sub ExecuteBatchLoop(colUnique As Collection, batchSize As Long, totalBatches As Long)
-    On Error GoTo BatchLoopErr
+    On Error GoTo ErrorHandler
     
     Dim batchIdx As Long, i As Long, k As Long, endIdx As Long
     
@@ -389,7 +561,7 @@ Private Sub ExecuteBatchLoop(colUnique As Collection, batchSize As Long, totalBa
         For k = i To endIdx
             batchIDs(colUnique(k)) = Empty
         Next k
-        On Error GoTo BatchLoopErr
+        On Error GoTo ErrorHandler
         
         If batchIDs.count = 0 Then
             Log "Batch " & batchIdx & " has 0 IDs - SKIPPED", "WARNING"
@@ -412,14 +584,14 @@ NextBatch:
     
     Exit Sub
     
-BatchLoopErr:
+ErrorHandler:
     Log "ExecuteBatchLoop ERROR at Batch " & batchIdx & ": " & Err.Description, "ERROR"
     Err.Raise Err.Number, "ExecuteBatchLoop", Err.Description
 End Sub
 
 ' ===========ProcessSingleBatch=============
 Private Function ProcessSingleBatch(batchIDs As Object, bIdx As Long) As Boolean
-    On Error GoTo BatchErr
+    On Error GoTo ErrorHandler
     
     ' Create temporary workbook
     Dim wbTemp As Workbook, wsTemp As Worksheet
@@ -462,25 +634,28 @@ CleanBatch:
     On Error GoTo 0
     Exit Function
     
-BatchErr:
+ErrorHandler:
     Log "BATCH ERROR " & bIdx & ": " & Err.Description, "ERROR"
     Resume CleanBatch
 End Function
 
 ' Create and return new temp workbook/worksheet
 Private Sub CreateTemporaryWorkbook(ByRef wbTemp As Workbook, ByRef wsTemp As Worksheet)
-    On Error GoTo CreateErr
+    On Error GoTo ErrorHandler
     
     Log "    Creating temp workbook..."
-    Set wbTemp = Workbooks.Add(xlWBATWorksheet)
+    Set wbTemp = Workbooks.Add(-4167) ' xlWBATemplate.xlWBATWorksheet
     Set wsTemp = wbTemp.Sheets(1)
-    
+    Log "    Temp workbook created successfully"
     Exit Sub
     
-CreateErr:
-    Log "    ERROR creating temp workbook: " & Err.Description, "ERROR"
+ErrorHandler:
+    Log "    Error creating temp workbook: " & Err.Description
+    Err.Clear
     Set wbTemp = Nothing
     Set wsTemp = Nothing
+    MsgBox "Error creating temporary workbook: " & Err.Description & vbCrLf & _
+           "Please ensure Excel has sufficient resources and permissions.", vbCritical, "Error"
 End Sub
 
 ' Call FilterDataToSheet for current batch
@@ -489,36 +664,26 @@ Private Function FilterBatchData(wsTemp As Worksheet, batchIDs As Object) As Boo
     
     FilterBatchData = False
     
-    Log "    Filtering data..."
     FilterDataToSheet g_SourceWS, wsTemp, batchIDs
-    
     FilterBatchData = True
+    
     Exit Function
     
 FilterErr:
-    Log "    FILTER ERROR: " & Err.Description, "ERROR"
+    Log "FILTER ERROR: " & Err.Description, "ERROR"
 End Function
 
-' Run applicable helpers on temp sheet
-Private Sub ExecuteBatchHelpers(wsTemp As Worksheet)
-    On Error GoTo HelperErr
-    
-    Log "    Running helpers..."
-    RunAllHelpers wsTemp
-    
-    Exit Sub
-    
-HelperErr:
-    Log "    ERROR executing helpers: " & Err.Description, "ERROR"
+' Execute all batch helpers
+Private Sub ExecuteBatchHelpers(ws As Worksheet)
+    RunAllHelpers ws
 End Sub
 
-' Save temp workbook to CSV with standardized naming
+' Save batch output to file
 Private Function SaveBatchOutput(wbTemp As Workbook, bIdx As Long) As Boolean
-    On Error GoTo SaveErr
+    On Error GoTo ErrorHandler
     
     SaveBatchOutput = False
     
-    Log "    Saving output..."
     Dim fName As String
     fName = OUT_PATH & g_FSO.GetBaseName(g_SourceWB.name) & _
             "_Batch_" & Format(bIdx, "000") & "_" & g_ProcessID & ".csv"
@@ -532,9 +697,13 @@ Private Function SaveBatchOutput(wbTemp As Workbook, bIdx As Long) As Boolean
     
     Exit Function
     
-SaveErr:
-    Log "    ERROR saving output: " & Err.Description, "ERROR"
+ErrorHandler:
+    Log "SAVE ERROR: " & Err.Description, "ERROR"
 End Function
+
+' ==============================================================================
+' HELPER SYSTEM FUNCTIONS
+' ==============================================================================
 
 ' ===========RunAllHelpers=============
 Private Sub RunAllHelpers(ws As Worksheet)
@@ -579,7 +748,6 @@ Private Sub RunAllHelpers(ws As Worksheet)
     'ExecuteHelper ws, "Helper_31_RiskInForce_and_DefaultClaimOutgo"
     'ExecuteHelper ws, "Helper_32_RI_Collateral"
     'ExecuteHelper ws, "Helper_33_RI_NPR"
-
 End Sub
 
 Private Sub ExecuteHelper(ws As Worksheet, procName As String)
@@ -597,6 +765,7 @@ End Sub
 ' ==============================================================================
 ' FILTERING ENGINE
 ' ==============================================================================
+
 Private Sub BuildRowIndex(ws As Worksheet)
     On Error GoTo IndexErr
     
@@ -647,31 +816,44 @@ IndexErr:
     Set g_RowIndex = CreateObject("Scripting.Dictionary")
 End Sub
 
-' 复制源工作表的表头到目标工作表
-Private Sub CopySourceHeader(srcWS As Worksheet, destWS As Worksheet)
+Private Sub FilterDataToSheet(srcWS As Worksheet, destWS As Worksheet, validIDs As Object)
+    On Error GoTo FilterErr
+    
+    If srcWS Is Nothing Then Err.Raise 91, , "Source worksheet is Nothing"
+    
+    Dim lr As Long: lr = GetLastRow(srcWS)
+    If lr < 1 Then
+        Log "      No data in source", "WARNING"
+        Exit Sub
+    End If
+    
+    Dim lc As Long: lc = GetLastColumn(srcWS)
+    
+    ' Copy header
     srcWS.Rows(1).Copy destWS.Rows(1)
-End Sub
-
-' 从源工作表读取数据并返回一个变体数组
-Private Function ReadSourceDataArray(srcWS As Worksheet, lr As Long, lc As Long) As Variant
-    On Error GoTo ReadErr
     
-    ReadSourceDataArray = srcWS.Range("A1", srcWS.Cells(lr, lc)).Value2
-    Exit Function
+    If lr < 2 Then Exit Sub
     
-ReadErr:
-    Log "      ERROR reading source: " & Err.Description, "ERROR"
-    ReadSourceDataArray = Empty
-End Function
-
-' 根据有效ID和全局行索引过滤数据数组
-Private Function FilterDataByValidIDs(vSrc As Variant, srcRows As Long, srcCols As Long, validIDs As Object) As Variant
+    ' Read source
+    Dim vSrc As Variant
+    On Error Resume Next
+    vSrc = srcWS.Range("A1", srcWS.Cells(lr, lc)).Value2
+    If Err.Number <> 0 Then
+        Log "      ERROR reading source: " & Err.Description, "ERROR"
+        Exit Sub
+    End If
+    On Error GoTo FilterErr
+    
+    vSrc = SafeArray2D(vSrc)
+    Dim srcRows As Long: srcRows = UBound(vSrc, 1)
+    Dim srcCols As Long: srcCols = UBound(vSrc, 2)
+    
     Dim vRes As Variant: ReDim vRes(1 To srcRows, 1 To srcCols)
     Dim outR As Long, r As Long, c As Long
     Dim miNo As Variant, rowCol As Collection, rowNum As Variant
     
-    ' 使用g_RowIndex进行高效查找（如果可用）
-    If Not g_RowIndex Is Nothing And g_RowIndex.Count > 0 Then
+    ' Use index if available
+    If Not g_RowIndex Is Nothing And g_RowIndex.count > 0 Then
         For Each miNo In validIDs.Keys
             If g_RowIndex.Exists(CStr(miNo)) Then
                 Set rowCol = g_RowIndex(CStr(miNo))
@@ -687,7 +869,7 @@ Private Function FilterDataByValidIDs(vSrc As Variant, srcRows As Long, srcCols 
             End If
         Next miNo
     Else
-        ' 回退方案：全表扫描
+        ' Fallback: Full scan
         For r = 2 To srcRows
             On Error Resume Next
             miNo = Trim(CStr(vSrc(r, 1)))
@@ -703,73 +885,13 @@ Private Function FilterDataByValidIDs(vSrc As Variant, srcRows As Long, srcCols 
         Next r
     End If
     
-    ' 将结果重新定义为实际大小
     If outR > 0 Then
-        Dim vFinal As Variant: ReDim vFinal(1 To outR, 1 To srcCols)
-        For r = 1 To outR
-            For c = 1 To srcCols
-                vFinal(r, c) = vRes(r, c)
-            Next c
-        Next r
-        FilterDataByValidIDs = vFinal
-    Else
-        FilterDataByValidIDs = Empty
+        destWS.Range("A2").Resize(outR, srcCols).Value2 = vRes
     End If
     
-    Exit Function
-    
-FilterErr:
-    Log "FilterDataByValidIDs ERROR: " & Err.Description, "ERROR"
-    FilterDataByValidIDs = Empty
-End Function
-
-' 将过滤后的数据数组写入目标工作表
-Private Sub WriteFilteredData(destWS As Worksheet, vRes As Variant)
-    If Not IsEmpty(vRes) Then
-        Dim outRows As Long: outRows = UBound(vRes, 1)
-        Dim outCols As Long: outCols = UBound(vRes, 2)
-        destWS.Range("A2").Resize(outRows, outCols).Value2 = vRes
-    End If
-End Sub
-
-' 主要的过滤流程，调用上述专用函数
-Private Sub FilterDataToSheet(srcWS As Worksheet, destWS As Worksheet, validIDs As Object)
-    On Error GoTo FilterErr
-    
-    If srcWS Is Nothing Then Err.Raise 91, , "Source worksheet is Nothing"
-    
-    ' 复制表头
-    CopySourceHeader srcWS, destWS
-    
-    Dim lr As Long: lr = GetLastRow(srcWS)
-    If lr < 1 Then
-        Log "      No data in source", "WARNING"
-        Exit Sub
-    End If
-    
-    Dim lc As Long: lc = GetLastColumn(srcWS)
-    
-    If lr < 2 Then Exit Sub
-    
-    ' 读取源数据
-    Dim vSrc As Variant
-    vSrc = ReadSourceDataArray(srcWS, lr, lc)
-    If IsEmpty(vSrc) Then Exit Sub
-    
-    vSrc = SafeArray2D(vSrc)
-    Dim srcRows As Long: srcRows = UBound(vSrc, 1)
-    Dim srcCols As Long: srcCols = UBound(vSrc, 2)
-    
-    ' 筛选数据
-    Dim vRes As Variant
-    vRes = FilterDataByValidIDs(vSrc, srcRows, srcCols, validIDs)
-    
-    ' 写入目标工作表
-    WriteFilteredData destWS, vRes
-    
-    ' 清理内存
     vSrc = Empty
     vRes = Empty
+    Set rowCol = Nothing
     Exit Sub
     
 FilterErr:
@@ -822,92 +944,167 @@ IDErr:
 End Function
 
 ' ==============================================================================
-' UTILITIES
+' COLUMN MANAGEMENT FUNCTIONS
 ' ==============================================================================
+
 ' ================= ENHANCED AddColumnIfNotExist - HANDLES ALL SITUATIONS =================
-' Merges functionality of AddColumnIfNotExist and AddCol into a single robust function
-Public Function AddColumn(ws As Worksheet, colName As String) As Long
+Public Sub AddColumnIfNotExist(ws As Worksheet, colName As String)
     On Error GoTo ErrHandler
     
     Dim ucName As String
     ucName = UCase(Trim(Replace(colName, Chr(160), " "))) ' Normalize
     
-    ' Fail-fast: Validate input
+    ' Validate input
     If Len(ucName) = 0 Then
-        Log "AddColumn: Empty column name provided", "WARNING"
-        AddColumn = 0
-        Exit Function
+        Log "AddColumnIfNotExist: Empty column name provided", "WARNING"
+        Exit Sub
     End If
     
-    ' Check if column already exists in header map
+    ' Step 1: Refresh header map to avoid stale state
+    On Error Resume Next
+    RefreshHeaderMap ws
+    If Err.Number <> 0 Then
+        Log "AddColumnIfNotExist: ERROR in RefreshHeaderMap: " & Err.Description, "WARNING"
+        Err.Clear
+        ' Continue anyway - try to add column
+    End If
+    On Error GoTo ErrHandler
+    
+    ' Step 2: Check if column already exists
     If g_HeaderMap.Exists(ucName) Then
-        ' Verify the column still exists and matches
+        ' Column exists, verify it's valid
         On Error Resume Next
         Dim existingCol As Long: existingCol = g_HeaderMap(ucName)
-        Dim existingHeader As String: existingHeader = ws.Cells(1, existingCol).value
+        Dim existingHeader As String: existingHeader = ws.Cells(1, existingCol).Value
         If Err.Number = 0 And UCase(Trim(existingHeader)) = ucName Then
             ' Valid existing column
-            AddColumn = existingCol
-            Exit Function
+            Exit Sub
         Else
             ' Stale map entry, remove it
+            Log "AddColumnIfNotExist: Stale map entry for " & colName & ", refreshing", "DEBUG"
             g_HeaderMap.Remove ucName
+            Err.Clear
         End If
         On Error GoTo ErrHandler
     End If
     
-    ' Find the next available column using efficient method (from AddCol)
-    Dim targetCol As Long
-    targetCol = ws.Cells(1, ws.Columns.count).End(xlToLeft).Column
-    If targetCol = 0 Then targetCol = 1
-    If ws.Cells(1, targetCol).value <> "" Then targetCol = targetCol + 1
+    ' Step 3: Determine last column position SAFELY
+    Dim lc As Long: lc = 0
     
-    ' Validate target column bounds
-    If targetCol > 16384 Then
-        Log "AddColumn: Cannot add column " & colName & " - Excel column limit reached", "ERROR"
-        AddColumn = 0
-        Exit Function
+    ' Method 1: Use HeaderMap (fastest if available)
+    On Error Resume Next
+    If g_HeaderMap.count > 0 Then
+        Dim maxCol As Long: maxCol = 0
+        Dim key As Variant
+        For Each key In g_HeaderMap.Keys
+            Dim colIdx As Long: colIdx = CLng(g_HeaderMap(key))
+            If Err.Number = 0 And colIdx > maxCol Then maxCol = colIdx
+            Err.Clear
+        Next key
+        If maxCol > 0 Then lc = maxCol
+    End If
+    Err.Clear
+    On Error GoTo ErrHandler
+    
+    ' Method 2: Use UsedRange (fallback)
+    If lc = 0 Then
+        On Error Resume Next
+        lc = ws.UsedRange.Columns.count
+        If Err.Number <> 0 Or lc = 0 Then
+            Err.Clear
+            ' Method 3: Scan row 1 (last resort)
+            lc = ws.Cells(1, ws.Columns.count).End(xlToLeft).Column
+            If Err.Number <> 0 Then lc = 1: Err.Clear
+        End If
+        On Error GoTo ErrHandler
     End If
     
-    ' Add header to worksheet
-    ws.Cells(1, targetCol).value = colName
+    ' Validate lc is reasonable
+    If lc < 1 Then lc = 1
+    If lc > 16384 Then lc = 16384 ' Excel column limit
     
-    ' Update header map
+    ' Step 4: Find first empty column (in case there are gaps)
+    Dim targetCol As Long: targetCol = lc + 1
+    On Error Resume Next
+    Dim checkAttempts As Long: checkAttempts = 0
+    Do While checkAttempts < 100 ' Prevent infinite loop
+        Dim headerVal As Variant: headerVal = ws.Cells(1, targetCol).Value
+        If Err.Number <> 0 Then
+            Err.Clear
+            Exit Do
+        End If
+        
+        ' Check if cell is truly empty
+        If IsEmpty(headerVal) Or headerVal = "" Or IsNull(headerVal) Then
+            Exit Do
+        End If
+        
+        ' Check if this column name matches what we want (case-insensitive)
+        If UCase(Trim(CStr(headerVal))) = ucName Then
+            ' Column already exists at this position!
+            g_HeaderMap(ucName) = targetCol
+            Exit Sub
+        End If
+        
+        targetCol = targetCol + 1
+        checkAttempts = checkAttempts + 1
+    Loop
+    Err.Clear
+    On Error GoTo ErrHandler
+    
+    ' Validate target column
+    If targetCol > 16384 Then
+        Log "AddColumnIfNotExist: Cannot add column " & colName & " - Excel column limit reached", "ERROR"
+        Exit Sub
+    End If
+    
+    ' Step 5: Add header with error handling
+    On Error Resume Next
+    ws.Cells(1, targetCol).Value = colName
+    If Err.Number <> 0 Then
+        Log "AddColumnIfNotExist: ERROR writing header to column " & targetCol & ": " & Err.Description, "ERROR"
+        Err.Clear
+        Exit Sub
+    End If
+    On Error GoTo ErrHandler
+    
+    ' Step 6: Update header map
     On Error Resume Next
     g_HeaderMap(ucName) = targetCol
     If Err.Number <> 0 Then
-        Log "AddColumn: ERROR updating HeaderMap: " & Err.Description, "WARNING"
+        Log "AddColumnIfNotExist: ERROR updating HeaderMap: " & Err.Description, "WARNING"
         Err.Clear
     End If
     On Error GoTo ErrHandler
     
-    AddColumn = targetCol
-    Exit Function
+    ' Step 7: Verify addition
+    On Error Resume Next
+    Dim verifyHeader As String: verifyHeader = ws.Cells(1, targetCol).Value
+    If Err.Number = 0 And UCase(Trim(verifyHeader)) = ucName Then
+        ' Success - no log needed for normal operation
+    Else
+        Log "AddColumnIfNotExist: WARNING - Column " & colName & " may not have been added correctly", "WARNING"
+    End If
+    Err.Clear
+    On Error GoTo ErrHandler
+    
+    Exit Sub
 
 ErrHandler:
-    Log "AddColumn: CRITICAL ERROR for column " & colName & ": " & Err.Description & " (Err#" & Err.Number & ")", "ERROR"
+    Log "AddColumnIfNotExist: CRITICAL ERROR for column " & colName & ": " & Err.Description & " (Err#" & Err.Number & ")", "ERROR"
     
     ' Attempt recovery: try direct write to next available column
     On Error Resume Next
     Dim recoveryCol As Long: recoveryCol = ws.Cells(1, ws.Columns.count).End(xlToLeft).Column + 1
     If recoveryCol > 0 And recoveryCol <= 16384 Then
-        ws.Cells(1, recoveryCol).value = colName
+        ws.Cells(1, recoveryCol).Value = colName
         If Err.Number = 0 Then
             g_HeaderMap(ucName) = recoveryCol
-            AddColumn = recoveryCol
-            Log "AddColumn: Recovery successful - added " & colName & " at column " & recoveryCol, "WARNING"
-            Exit Function
+            Log "AddColumnIfNotExist: Recovery successful - added " & colName & " at column " & recoveryCol, "WARNING"
         End If
     End If
-    
-    AddColumn = 0
     Err.Clear
     On Error GoTo 0
-End Function
-
-' Keep backward compatibility
-Public Sub AddColumnIfNotExist(ws As Worksheet, colName As String)
-    AddColumn ws, colName
 End Sub
 
 Public Function GetColumnIndex(ws As Worksheet, colName As String) As Long
@@ -928,7 +1125,7 @@ Private Sub RefreshHeaderMap(ws As Worksheet)
     
     Dim vHead As Variant
     On Error Resume Next
-    vHead = ws.rows(1).Value2
+    vHead = ws.Rows(1).Value2
     If Err.Number <> 0 Then Exit Sub
     On Error GoTo RefreshErr
     
@@ -952,6 +1149,10 @@ Private Sub RefreshHeaderMap(ws As Worksheet)
 RefreshErr:
     Log "RefreshHeaderMap ERROR: " & Err.Description, "ERROR"
 End Sub
+
+' ==============================================================================
+' TYPE-SAFE CONVERSION FUNCTIONS
+' ==============================================================================
 
 ' ======== FIXED NZ FUNCTIONS - EXPLICIT PARAMETERS ========
 Public Function NzLong(data As Variant, row As Long, col As Long) As Long
@@ -1001,264 +1202,6 @@ Public Function NzString(data As Variant, r As Long, c As Long) As String
     On Error GoTo 0
 End Function
 
-' ======== INLINE NZ FUNCTIONS - EXPLICIT PARAMETERS ========
-' =================== INLINE NZDOUBLE (OPTIMIZED) ===================
-Private Function InlineNzDouble(v As Variant) As Double
-    On Error Resume Next
-    Select Case varType(v)
-        Case 2 To 6, 14, 17, 20: InlineNzDouble = CDbl(v)
-        Case 8: InlineNzDouble = CDbl(v)
-        Case Else: InlineNzDouble = 0#
-    End Select
-    If Err.Number <> 0 Then InlineNzDouble = 0#: Err.Clear
-End Function
-
-' =================== UNIFIED NULL-SAFE CONVERSION SYSTEM ===================
-' Core validation function that checks for empty/null/error values
-Private Function NzConvert(ByVal val As Variant) As Variant
-    ' Fail-fast: Handle empty/null/error values immediately
-    If IsEmpty(val) Or IsNull(val) Or IsError(val) Then
-        NzConvert = Empty
-        Exit Function
-    End If
-    
-    NzConvert = val
-End Function
-
-' Converts a value from an array to a Long with null/error safety
-Public Function NzToLong(data As Variant, Optional row As Long = 1, Optional col As Long = 1) As Long
-    On Error Resume Next
-    
-    Dim val As Variant
-    If IsArray(data) Then
-        If row <= UBound(data, 1) And col <= UBound(data, 2) Then
-            val = NzConvert(data(row, col))
-            If IsEmpty(val) Then
-                NzToLong = 0
-                Exit Function
-            End If
-            
-            If IsNumeric(val) Then
-                NzToLong = CLng(val)
-            Else
-                NzToLong = 0
-            End If
-        Else
-            NzToLong = 0
-        End If
-    Else
-        val = NzConvert(data)
-        If IsEmpty(val) Then
-            NzToLong = 0
-            Exit Function
-        End If
-        
-        If IsNumeric(val) Then
-            NzToLong = CLng(val)
-        Else
-            NzToLong = 0
-        End If
-    End If
-    
-    If Err.Number <> 0 Then NzToLong = 0
-    On Error GoTo 0
-End Function
-
-' Converts a value from an array to a Double with null/error safety
-Public Function NzToDouble(data As Variant, Optional row As Long = 1, Optional col As Long = 1) As Double
-    On Error Resume Next
-    
-    Dim val As Variant
-    If IsArray(data) Then
-        If row <= UBound(data, 1) And col <= UBound(data, 2) Then
-            val = NzConvert(data(row, col))
-            If IsEmpty(val) Then
-                NzToDouble = 0#
-                Exit Function
-            End If
-            
-            If IsNumeric(val) Then
-                NzToDouble = CDbl(val)
-            Else
-                NzToDouble = 0#
-            End If
-        Else
-            NzToDouble = 0#
-        End If
-    Else
-        val = NzConvert(data)
-        If IsEmpty(val) Then
-            NzToDouble = 0#
-            Exit Function
-        End If
-        
-        If IsNumeric(val) Then
-            NzToDouble = CDbl(val)
-        Else
-            NzToDouble = 0#
-        End If
-    End If
-    
-    If Err.Number <> 0 Then NzToDouble = 0#
-    On Error GoTo 0
-End Function
-
-' Converts a value from an array to a String with null/error safety
-Public Function NzToString(data As Variant, Optional row As Long = 1, Optional col As Long = 1) As String
-    On Error Resume Next
-    
-    Dim val As Variant
-    If IsArray(data) Then
-        If row <= UBound(data, 1) And col <= UBound(data, 2) Then
-            val = NzConvert(data(row, col))
-            If IsEmpty(val) Then
-                NzToString = ""
-                Exit Function
-            End If
-            
-            NzToString = Trim(CStr(val))
-        Else
-            NzToString = ""
-        End If
-    Else
-        val = NzConvert(data)
-        If IsEmpty(val) Then
-            NzToString = ""
-            Exit Function
-        End If
-        
-        NzToString = Trim(CStr(val))
-    End If
-    
-    If Err.Number <> 0 Then NzToString = ""
-    On Error GoTo 0
-End Function
-
-' Fast inline conversion of a variant to Double with null/error safety
-Public Function NzToDoubleFast(val As Variant) As Double
-    On Error Resume Next
-    
-    Dim safeVal As Variant: safeVal = NzConvert(val)
-    If IsEmpty(safeVal) Then
-        NzToDoubleFast = 0#
-        Exit Function
-    End If
-    
-    Select Case VarType(safeVal)
-        Case 2 To 6, 14, 17, 20  ' Numeric types
-            NzToDoubleFast = CDbl(safeVal)
-        Case 8  ' String
-            NzToDoubleFast = CDbl(safeVal)
-        Case Else
-            NzToDoubleFast = 0#
-    End Select
-    
-    If Err.Number <> 0 Then NzToDoubleFast = 0#
-    On Error GoTo 0
-End Function
-
-Private Sub InitializeGlobalCollections()
-    ' Initialize all global collection objects
-    Set g_FSO = CreateObject("Scripting.FileSystemObject")
-    Set g_HeaderMap = CreateObject("Scripting.Dictionary")
-    Set g_LookupData = CreateObject("Scripting.Dictionary")
-    Set g_RowIndex = CreateObject("Scripting.Dictionary")
-    Set g_colIndexDict = g_HeaderMap
-End Sub
-
-Private Sub EnsureRequiredFolders()
-    ' Ensure required folder structure exists
-    If Not g_FSO.FolderExists(OUT_PATH) Then g_FSO.CreateFolder OUT_PATH
-    If Not g_FSO.FolderExists(LOG_PATH) Then g_FSO.CreateFolder LOG_PATH
-End Sub
-
-Private Sub InitializeProcessLogging()
-    ' Generate process ID and initialize logging
-    g_ProcessID = Format(Now, "yyyymmdd_hhmmss")
-    
-    Dim logFile As String: logFile = LOG_PATH & "Run_" & g_ProcessID & ".txt"
-    Set g_LogStream = g_FSO.CreateTextFile(logFile, True)
-    
-    Log "Process ID: " & g_ProcessID
-    Log "Log file: " & logFile
-End Sub
-
-Private Sub InitializeGlobals()
-    ' Initialize all globals by calling specialized initialization functions
-    InitializeGlobalCollections
-    EnsureRequiredFolders
-    InitializeProcessLogging
-End Sub
-
-Private Sub CleanUpResources()
-    On Error Resume Next
-    If Not g_LogStream Is Nothing Then 
-        g_LogStream.Close
-        Set g_LogStream = Nothing
-    End If
-    If Not g_SourceWB Is Nothing Then 
-        g_SourceWB.Close False
-        Set g_SourceWB = Nothing
-    End If
-    Set g_SourceWS = Nothing
-    Set g_FSO = Nothing
-    Set g_HeaderMap = Nothing
-    Set g_LookupData = Nothing
-    Set g_RowIndex = Nothing
-    Set g_colIndexDict = Nothing
-    Set g_patternDict = Nothing
-    On Error GoTo 0
-End Sub
-
-Private Sub ToggleOptimization(bOn As Boolean)
-    With Application
-        .ScreenUpdating = Not bOn
-        .Calculation = IIf(bOn, xlCalculationManual, xlCalculationAutomatic)
-        .EnableEvents = Not bOn
-        .DisplayAlerts = Not bOn
-        .StatusBar = Not bOn
-    End With
-End Sub
-
-Private Sub Log(msg As String, Optional sType As String = "INFO")
-    Dim s As String: s = Format(Now, "hh:mm:ss") & " [" & sType & "] " & msg
-    If DEBUG_PRINT Then Debug.Print s
-    On Error Resume Next
-    If Not g_LogStream Is Nothing Then 
-        g_LogStream.WriteLine s
-    Else
-        ' Fallback to immediate window if log stream unavailable
-        Debug.Print s
-    End If
-    On Error GoTo 0
-End Sub
-
-Private Function CalculateBatchSize(total As Long) As Long
-    Select Case total
-        Case Is > 10000: CalculateBatchSize = 3000
-        Case Is > 5000: CalculateBatchSize = 2000
-        Case Is > 2000: CalculateBatchSize = 1500
-        Case Is > 500: CalculateBatchSize = Application.Min(total, 1000)
-        Case Else: CalculateBatchSize = total
-    End Select
-End Function
-
-Private Function BrowseForFile() As String
-    With Application.FileDialog(msoFileDialogFilePicker)
-        .Title = "Select Input File"
-        .Filters.Clear
-        .Filters.Add "Excel Files", "*.xlsx;*.xls;*.xlsm"
-        .Filters.Add "CSV Files", "*.csv"
-        .Filters.Add "All Files", "*.*"
-        If .Show = -1 Then BrowseForFile = .SelectedItems(1)
-    End With
-End Function
-
-
-' ==============================================================================
-' HELPER UTILITY FUNCTIONS - TYPE-SAFE CONVERSIONS
-' ==============================================================================
-
 ' ===========NzStr - NULL-SAFE STRING CONVERSION=============
 Private Function NzStr(v As Variant) As String
     On Error Resume Next
@@ -1282,7 +1225,420 @@ Private Function NzStr(v As Variant) As String
     On Error GoTo 0
 End Function
 
+' ========ParseDateFast - HANDLES YYYYMMDD FORMAT===========
+Public Function ParseDateFast(ByVal v As Variant, ByRef outDate As Date) As Boolean
+    On Error Resume Next
+    
+    ' Handle Empty/Null/Error
+    If IsEmpty(v) Or IsNull(v) Or IsError(v) Then Exit Function
+    
+    ' Numeric branch
+    If IsNumeric(v) Then
+        Dim dblVal As Double: dblVal = CDbl(v)
+        
+        ' YYYYMMDD format
+        If dblVal >= 19000101 And dblVal <= 99991231 Then
+            Dim y As Long, m As Long, d As Long
+            y = Int(dblVal / 10000)
+            m = Int((dblVal - y * 10000) / 100)
+            d = dblVal - y * 10000 - m * 100
+            If y >= 1900 And y <= 9999 And m >= 1 And m <= 12 And d >= 1 And d <= 31 Then
+                outDate = DateSerial(y, m, d)
+                If Err.Number = 0 Then ParseDateFast = True
+            End If
+        ' Excel serial
+        ElseIf dblVal > 0 And dblVal < 2958466 Then
+            outDate = CDate(dblVal)
+            If Err.Number = 0 Then ParseDateFast = True
+        End If
+    
+    ' Text branch (CSV often loads dates as text)
+    ElseIf VarType(v) = vbString Then
+        If IsDate(v) Then
+            outDate = CDate(v)
+            If Err.Number = 0 Then ParseDateFast = True
+        End If
+    End If
+    
+    Err.Clear
+    On Error GoTo 0
+End Function
 
+' ========ParseTenorFast - UNCHANGED===========
+Private Function ParseTenorFast(ByVal v As Variant, ByRef outTenor As Long) As Boolean
+    On Error Resume Next
+    
+    ' Handle Empty/Null/Error
+    If IsEmpty(v) Or IsNull(v) Or IsError(v) Then Exit Function
+    
+    ' Try numeric conversion
+    If IsNumeric(v) Then
+        outTenor = CLng(v)
+        If Err.Number = 0 Then
+            ParseTenorFast = True
+        End If
+    End If
+    
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+' ========ADD Column - MAX PERFORMANCE===========
+Private Function AddCol(ws As Worksheet, colName As String) As Long
+    Dim upperName As String: upperName = UCase(colName)
+    
+    If g_HeaderMap.Exists(upperName) Then
+        AddCol = g_HeaderMap(upperName)
+    Else
+        Dim lc As Long: lc = ws.Cells(1, ws.Columns.count).End(xlToLeft).Column
+        If lc = 0 Then lc = 1
+        If ws.Cells(1, lc).Value <> "" Then lc = lc + 1
+        
+        ws.Cells(1, lc).Value = colName
+        g_HeaderMap(upperName) = lc
+        AddCol = lc
+    End If
+End Function
+
+' ========MonthDifference - OPTIMIZED===========
+Private Function MonthDifference(dateSerial1 As Double, dateSerial2 As Double) As Long
+    On Error GoTo CalcErr
+    
+    Dim d1 As Date, d2 As Date
+    d1 = CDate(dateSerial1)
+    d2 = CDate(dateSerial2)
+    
+    MonthDifference = (Year(d2) - Year(d1)) * 12 + (Month(d2) - Month(d1))
+    Exit Function
+    
+CalcErr:
+    MonthDifference = -999 ' Error indicator (explicitly handled in caller)
+End Function
+
+' =================== OPTIMIZED DATE FUNCTIONS ===================
+Private Function ConvertNumericToDate(numericValue As Double) As Date
+    ' YYYYMMDD format
+    If numericValue >= 19000101 And numericValue <= 99991231 Then
+        Dim yearPart As Long: yearPart = Int(numericValue / 10000)
+        Dim monthPart As Long: monthPart = Int((numericValue - yearPart * 10000) / 100)
+        Dim dayPart As Long: dayPart = numericValue - yearPart * 10000 - monthPart * 100
+        ConvertNumericToDate = DateSerial(yearPart, monthPart, dayPart)
+    ' Excel serial date
+    ElseIf numericValue > 0 And numericValue < 2958466 Then
+        ConvertNumericToDate = CDate(numericValue)
+    Else
+        Err.Raise 13, "ConvertNumericToDate", "Invalid numeric date: " & numericValue
+    End If
+End Function
+
+Private Function DateDiffMonths(startDate As Date, endDate As Date) As Long
+    DateDiffMonths = DateDiff("m", startDate, endDate)
+End Function
+
+Private Function DateAddMonths(baseDate As Date, monthsToAdd As Long) As Date
+    DateAddMonths = DateAdd("m", monthsToAdd, baseDate)
+End Function
+
+' =================== SAFE ARRAY WRAPPER ===================
+Private Function SafeArray2D(inputValue As Variant) As Variant
+    On Error Resume Next
+    
+    If Not IsArray(inputValue) Then
+        Dim singleValueArray(1 To 1, 1 To 1) As Variant
+        singleValueArray(1, 1) = inputValue
+        SafeArray2D = singleValueArray
+        Exit Function
+    End If
+    
+    Dim testRows As Long: testRows = UBound(inputValue, 1)
+    Dim testCols As Long: testCols = UBound(inputValue, 2)
+    
+    If Err.Number = 0 Then
+        SafeArray2D = inputValue
+    Else
+        Err.Clear
+        Dim arrayBound As Long: arrayBound = UBound(inputValue)
+        Dim converted2D(1 To 1, 1 To 1) As Variant
+        If arrayBound >= LBound(inputValue) Then
+            converted2D(1, 1) = inputValue(LBound(inputValue))
+        End If
+        SafeArray2D = converted2D
+    End If
+    
+    On Error GoTo 0
+End Function
+
+' =================== FAST CONVERSION (MATCHES NzLong) ===================
+Private Function FastCLng(v As Variant) As Long
+    Select Case VarType(v)
+        Case 2 To 6, 14, 17, 20  ' Numeric types
+            On Error Resume Next
+            FastCLng = CLng(v)
+            If Err.Number <> 0 Then FastCLng = 0: Err.Clear
+        Case 8  ' String
+            On Error Resume Next
+            FastCLng = CLng(v)
+            If Err.Number <> 0 Then FastCLng = 0: Err.Clear
+        Case Else
+            FastCLng = 0
+    End Select
+End Function
+
+' =================== NZD - OPTIMIZED ===================
+Private Function NzD(v As Variant) As Double
+    '  MATCHES OLD: Error-safe conversion with overflow protection
+    On Error Resume Next
+    If IsNumeric(v) Then NzD = CDbl(v)
+    If Err.Number <> 0 Then NzD = 0#: Err.Clear
+End Function
+
+' =================== PDATEFAST - OPTIMIZED ===================
+Private Function PDateFast(v As Variant, ByRef outDate As Date) As Boolean
+    '  MATCHES OLD: Robust date parsing with error handling
+    On Error Resume Next
+    
+    If IsEmpty(v) Or IsNull(v) Or IsError(v) Then Exit Function
+    
+    If IsNumeric(v) Then
+        Dim dv As Double: dv = CDbl(v)
+        
+        ' YYYYMMDD format
+        If dv >= 19000101# And dv <= 99991231# Then
+            Dim y As Long, m As Long, d As Long
+            y = Int(dv / 10000)
+            m = Int((dv - y * 10000) / 100)
+            d = dv - y * 10000 - m * 100
+            If y >= 1900 And y <= 9999 And m >= 1 And m <= 12 And d >= 1 And d <= 31 Then
+                outDate = DateSerial(y, m, d)
+                PDateFast = (Err.Number = 0)
+            End If
+        ' Excel serial (>0 to reject serial 0)
+        ElseIf dv > 0# And dv < 2958466# Then
+            outDate = CDate(dv)
+            PDateFast = (Err.Number = 0)
+        End If
+    
+    ' String branch
+    ElseIf VarType(v) = 8 Then
+        If IsDate(v) Then
+            outDate = CDate(v)
+            PDateFast = (Err.Number = 0)
+        End If
+    End If
+    
+    Err.Clear
+End Function
+
+' =================== INLINE NZDOUBLE (OPTIMIZED) ===================
+Private Function InlineNzDouble(v As Variant) As Double
+    On Error Resume Next
+    Select Case VarType(v)
+        Case 2 To 6, 14, 17, 20: InlineNzDouble = CDbl(v)
+        Case 8: InlineNzDouble = CDbl(v)
+        Case Else: InlineNzDouble = 0#
+    End Select
+    If Err.Number <> 0 Then InlineNzDouble = 0#: Err.Clear
+End Function
+
+' =================== ProcessChunked ===================
+Private Sub ProcessSinglePass(ws As Worksheet, lr As Long, _
+                              cOpt As Long, cAmt As Long, cRate As Long, cRIPct As Long, _
+                              cYr As Long, cMon As Long, cDur As Long, cRI As Long, _
+                              cComm As Long, cCommBOP As Long, cRIComm As Long, cRICommBOP As Long)
+    
+    Dim vOpt As Variant: vOpt = ws.Range(ws.Cells(2, cOpt), ws.Cells(lr, cOpt)).Value2
+    Dim vAmt As Variant: vAmt = ws.Range(ws.Cells(2, cAmt), ws.Cells(lr, cAmt)).Value2
+    Dim vRate As Variant: vRate = ws.Range(ws.Cells(2, cRate), ws.Cells(lr, cRate)).Value2
+    Dim vRIPct As Variant: vRIPct = ws.Range(ws.Cells(2, cRIPct), ws.Cells(lr, cRIPct)).Value2
+    Dim vYr As Variant: vYr = ws.Range(ws.Cells(2, cYr), ws.Cells(lr, cYr)).Value2
+    Dim vMon As Variant: vMon = ws.Range(ws.Cells(2, cMon), ws.Cells(lr, cMon)).Value2
+    Dim vDur As Variant: vDur = ws.Range(ws.Cells(2, cDur), ws.Cells(lr, cDur)).Value2
+    Dim vRI As Variant: vRI = ws.Range(ws.Cells(2, cRI), ws.Cells(lr, cRI)).Value2
+    
+    vOpt = SafeArray2D(vOpt): vAmt = SafeArray2D(vAmt): vRate = SafeArray2D(vRate)
+    vRIPct = SafeArray2D(vRIPct): vYr = SafeArray2D(vYr): vMon = SafeArray2D(vMon)
+    vDur = SafeArray2D(vDur): vRI = SafeArray2D(vRI)
+    
+    Dim rows As Long: rows = UBound(vOpt, 1)
+    Dim vOut() As Double: ReDim vOut(1 To rows, 1 To 4)
+    
+    Dim r As Long, v As Variant, optType As String
+    Dim amt As Double, rate As Double, riPct As Double, calcComm As Double
+    Dim yr As Long, mon As Long, dur As Long, isRI As Boolean
+    Dim errCount As Long: errCount = 0
+    
+    For r = 1 To rows
+        v = vOpt(r, 1)
+        If VarType(v) = vbString Then
+            optType = UCase$(Trim$(CStr(v)))
+            
+            If optType = "SI" Then
+                amt = 0: rate = 0: riPct = 0: yr = 0: mon = 0: dur = 0: isRI = False
+                
+                v = vAmt(r, 1)
+                If IsNumeric(v) And Not IsEmpty(v) Then
+                    amt = CDbl(v)
+                Else
+                    errCount = errCount + 1
+                End If
+                
+                v = vRate(r, 1)
+                If IsNumeric(v) And Not IsEmpty(v) Then
+                    rate = CDbl(v)
+                Else
+                    errCount = errCount + 1
+                End If
+                
+                v = vRIPct(r, 1)
+                If IsNumeric(v) And Not IsEmpty(v) Then
+                    riPct = CDbl(v) * 0.01
+                Else
+                    errCount = errCount + 1
+                End If
+                
+                v = vYr(r, 1)
+                If IsNumeric(v) And Not IsEmpty(v) Then yr = CLng(v)
+                
+                v = vMon(r, 1)
+                If IsNumeric(v) And Not IsEmpty(v) Then mon = CLng(v)
+                
+                v = vDur(r, 1)
+                If IsNumeric(v) And Not IsEmpty(v) Then dur = CLng(v)
+                
+                v = vRI(r, 1)
+                If VarType(v) = vbString Then
+                    isRI = (UCase$(Trim$(CStr(v))) = "Y")
+                ElseIf IsNumeric(v) Then
+                    isRI = (CLng(v) = 1)
+                End If
+                
+                calcComm = amt * rate
+                
+                If yr = 1 And mon = 1 Then
+                    vOut(r, 1) = calcComm
+                    If isRI Then vOut(r, 3) = calcComm * riPct
+                End If
+                
+                If dur = 1 Then
+                    vOut(r, 2) = calcComm
+                    If isRI Then vOut(r, 4) = calcComm * riPct
+                End If
+            End If
+        End If
+    Next r
+    
+    ws.Cells(2, cComm).Resize(rows, 4).Value2 = vOut
+    
+    Erase vOpt, vAmt, vRate, vRIPct, vYr, vMon, vDur, vRI, vOut
+    
+    If errCount > 0 Then Log "H28: " & errCount & " conversion errors", "WARNING"
+End Sub
+
+' =================== ProcessChunked ===================
+Private Sub ProcessChunked(ws As Worksheet, lr As Long, _
+                           cOpt As Long, cAmt As Long, cRate As Long, cRIPct As Long, _
+                           cYr As Long, cMon As Long, cDur As Long, cRI As Long, _
+                           cComm As Long, cCommBOP As Long, cRIComm As Long, cRICommBOP As Long, _
+                           is64Bit As Boolean)
+    
+    Dim targetMB As Long: targetMB = IIf(is64Bit, 75, 30)
+    Dim chunkRows As Long: chunkRows = (targetMB * 131072) \ 8
+    If chunkRows > 150000 Then chunkRows = 150000
+    If chunkRows < 5000 Then chunkRows = 5000
+    
+    Dim chunkStart As Long: chunkStart = 2
+    Dim chunkEnd As Long, rows As Long, r As Long
+    Dim vOpt As Variant, vAmt As Variant, vRate As Variant, vRIPct As Variant
+    Dim vYr As Variant, vMon As Variant, vDur As Variant, vRI As Variant
+    Dim vOut() As Double, v As Variant, optType As String
+    Dim amt As Double, rate As Double, riPct As Double, calcComm As Double
+    Dim yr As Long, mon As Long, dur As Long, isRI As Boolean
+    Dim totalErrors As Long: totalErrors = 0
+    
+    Do While chunkStart <= lr
+        chunkEnd = Application.Min(chunkStart + chunkRows - 1, lr)
+        
+        vOpt = SafeArray2D(ws.Range(ws.Cells(chunkStart, cOpt), ws.Cells(chunkEnd, cOpt)).Value2)
+        vAmt = SafeArray2D(ws.Range(ws.Cells(chunkStart, cAmt), ws.Cells(chunkEnd, cAmt)).Value2)
+        vRate = SafeArray2D(ws.Range(ws.Cells(chunkStart, cRate), ws.Cells(chunkEnd, cRate)).Value2)
+        vRIPct = SafeArray2D(ws.Range(ws.Cells(chunkStart, cRIPct), ws.Cells(chunkEnd, cRIPct)).Value2)
+        vYr = SafeArray2D(ws.Range(ws.Cells(chunkStart, cYr), ws.Cells(chunkEnd, cYr)).Value2)
+        vMon = SafeArray2D(ws.Range(ws.Cells(chunkStart, cMon), ws.Cells(chunkEnd, cMon)).Value2)
+        vDur = SafeArray2D(ws.Range(ws.Cells(chunkStart, cDur), ws.Cells(chunkEnd, cDur)).Value2)
+        vRI = SafeArray2D(ws.Range(ws.Cells(chunkStart, cRI), ws.Cells(chunkEnd, cRI)).Value2)
+        
+        rows = UBound(vOpt, 1)
+        ReDim vOut(1 To rows, 1 To 4)
+        
+        For r = 1 To rows
+            v = vOpt(r, 1)
+            If VarType(v) = vbString Then
+                optType = UCase$(Trim$(CStr(v)))
+                
+                If optType = "SI" Then
+                    amt = 0: rate = 0: riPct = 0: yr = 0: mon = 0: dur = 0: isRI = False
+                    
+                    v = vAmt(r, 1)
+                    If IsNumeric(v) And Not IsEmpty(v) Then
+                        amt = CDbl(v)
+                    Else
+                        totalErrors = totalErrors + 1
+                    End If
+                    
+                    v = vRate(r, 1)
+                    If IsNumeric(v) And Not IsEmpty(v) Then
+                        rate = CDbl(v)
+                    Else
+                        totalErrors = totalErrors + 1
+                    End If
+                    
+                    v = vRIPct(r, 1)
+                    If IsNumeric(v) And Not IsEmpty(v) Then
+                        riPct = CDbl(v) * 0.01
+                    Else
+                        totalErrors = totalErrors + 1
+                    End If
+                    
+                    v = vYr(r, 1)
+                    If IsNumeric(v) And Not IsEmpty(v) Then yr = CLng(v)
+                    
+                    v = vMon(r, 1)
+                    If IsNumeric(v) And Not IsEmpty(v) Then mon = CLng(v)
+                    
+                    v = vDur(r, 1)
+                    If IsNumeric(v) And Not IsEmpty(v) Then dur = CLng(v)
+                    
+                    v = vRI(r, 1)
+                    If VarType(v) = vbString Then
+                        isRI = (UCase$(Trim$(CStr(v))) = "Y")
+                    ElseIf IsNumeric(v) Then
+                        isRI = (CLng(v) = 1)
+                    End If
+                    
+                    calcComm = amt * rate
+                    
+                    If yr = 1 And mon = 1 Then
+                        vOut(r, 1) = calcComm
+                        If isRI Then vOut(r, 3) = calcComm * riPct
+                    End If
+                    
+                    If dur = 1 Then
+                        vOut(r, 2) = calcComm
+                        If isRI Then vOut(r, 4) = calcComm * riPct
+                    End If
+                End If
+            End If
+        Next r
+        
+        ws.Cells(chunkStart, cComm).Resize(rows, 4).Value2 = vOut
+        
+        Erase vOpt, vAmt, vRate, vRIPct, vYr, vMon, vDur, vRI, vOut
+        
+        chunkStart = chunkEnd + 1
+    Loop
+    
+    If totalErrors > 0 Then Log "H28: " & totalErrors & " conversion errors", "WARNING"
+End Sub
 
 ' ===========LoadDefaultPatterns - LOAD PATTERN LOOKUP=============
 Private Sub LoadDefaultPatterns()
@@ -1346,76 +1702,5 @@ LoadPatErr:
 End Sub
 
 ' ==============================================================================
-' VALIDATION & TESTING UTILITIES
+' END OF MAIN MODULE
 ' ==============================================================================
-
-' ===========ValidateHelperOutput - COMPARE BEFORE/AFTER=============
-' USAGE: Call after running helper to validate output matches expected
-Public Function ValidateHelperOutput(ws As Worksheet, colName As String, _
-                                     expectedSum As Double) As Boolean
-    On Error Resume Next
-    
-    Dim cIdx As Long: cIdx = GetColumnIndex(ws, colName)
-    If cIdx = 0 Then
-        Log "ValidateHelperOutput: Column '" & colName & "' not found", "ERROR"
-        ValidateHelperOutput = False
-        Exit Function
-    End If
-    
-    Dim lr As Long: lr = GetLastRow(ws)
-    If lr < 2 Then
-        ValidateHelperOutput = True
-        Exit Function
-    End If
-    
-    ' Calculate sum
-    Dim actualSum As Double
-    actualSum = Application.WorksheetFunction.Sum(ws.Range(ws.Cells(2, cIdx), ws.Cells(lr, cIdx)))
-    
-    ' Compare with tolerance
-    Dim tolerance As Double: tolerance = 0.01
-    Dim diff As Double: diff = Abs(actualSum - expectedSum)
-    
-    If diff <= tolerance Then
-        ValidateHelperOutput = True
-        Log "ValidateHelperOutput: '" & colName & "' PASSED (sum=" & Format(actualSum, "0.00") & ")"
-    Else
-        ValidateHelperOutput = False
-        Log "ValidateHelperOutput: '" & colName & "' FAILED (expected=" & expectedSum & ", actual=" & actualSum & ")", "ERROR"
-    End If
-    
-    On Error GoTo 0
-End Function
-
-' ===========GetDynamicChunkSize - CALCULATE OPTIMAL CHUNK SIZE=============
-Public Function GetDynamicChunkSize(ws As Worksheet) As Long
-    On Error Resume Next
-    Dim colCount As Long: colCount = GetLastColumn(ws)
-    
-    ' More aggressive chunking based on column count
-    Select Case colCount
-        Case Is <= 20: GetDynamicChunkSize = 150000  ' Small datasets
-        Case Is <= 40: GetDynamicChunkSize = 100000  ' Medium
-        Case Is <= 60: GetDynamicChunkSize = 50000   ' Large
-        Case Else: GetDynamicChunkSize = 25000       ' Very large
-    End Select
-    
-    ' Cap based on available memory
-    Dim memAvailable As Long: memAvailable = Application.MemoryFree
-    If memAvailable < 100000000 Then ' Less than 100MB
-        GetDynamicChunkSize = GetDynamicChunkSize \ 2
-    End If
-    On Error GoTo 0
-End Function
-
-' ===========MemoryUsageLog - LOG CURRENT MEMORY USAGE=============
-Private Sub MemoryUsageLog(context As String)
-    On Error Resume Next
-    
-    Dim memUsed As Long
-    memUsed = Application.MemoryUsed
-    
-    Log context & " | Memory: " & Format(memUsed / 1024, "#,##0") & " KB"
-    
-    On Error GoTo 0
-End Sub
