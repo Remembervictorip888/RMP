@@ -1,0 +1,181 @@
+Option Explicit
+
+' =============================================================================
+' HELPER FUNCTION TEMPLATE - OPTIMIZED VERSION
+' =============================================================================
+
+' BEST PRACTICES IMPLEMENTED:
+' 1. Shortest and simplest implementation
+' 2. Clean code with no redundancy
+' 3. Maximum performance and speed
+' 4. Efficient resource management with proper cleanup
+' 5. Meaningful and consistent variable names
+' 6. Automatic type conversion and handling
+' 7. Support for minimal datasets (2 rows: 1 header + 1 data)
+' 8. Built-in timing and error handling
+' 9. Chunking capability for large datasets
+
+' Template for optimized Helper functions
+Private Sub Helper_XX_Template(ws As Worksheet)
+    ' Declare all variables upfront (Clean code)
+    Dim startTime As Double: startTime = Timer
+    Dim lr As Long, lc As Long
+    Dim cInputCol As Long, cOutputCol As Long
+    Dim vDataArray As Variant
+    Dim i As Long
+    
+    ' Use centralized error handling
+    On Error GoTo ErrorHandler
+    
+    ' Log start of function
+    Log "Helper_XX_Template START"
+    
+    ' Validate worksheet parameter
+    If ws Is Nothing Then
+        Log "Helper_XX_Template ERROR: Worksheet parameter is Nothing", "ERROR"
+        Exit Sub
+    End If
+    
+    ' Defensive programming - Validate columns and data types upfront
+    cInputCol = GetColumnIndex(ws, "INPUT_COLUMN_NAME")
+    If cInputCol = 0 Then
+        Log "Helper_XX_Template ERROR: Required column 'INPUT_COLUMN_NAME' not found", "ERROR"
+        Exit Sub ' Fail fast
+    End If
+    
+    ' Get data dimensions
+    lr = GetLastRow(ws)
+    lc = GetLastColumn(ws)
+    
+    ' Handle minimal dataset case (1 header + 1 data row)
+    If lr < 2 Then
+        Log "Helper_XX_Template WARNING: No data rows to process", "WARNING"
+        Exit Sub ' Fail fast but not as error
+    End If
+    
+    ' Speed/Scalability - Dynamic chunking based on column count
+    Dim chunkSize As Long
+    chunkSize = CalculateOptimalChunkSize(lc, lr)
+    
+    ' Speed/Scalability - In-memory arrays with SafeArray2D
+    vDataArray = SafeArray2D(ws.Range(ws.Cells(1, 1), ws.Cells(lr, lc)).Value2)
+    
+    ' Modular - Reuse shared utilities (no duplicates)
+    AddColumn ws, "OUTPUT_COLUMN"
+    cOutputCol = GetColumnIndex(ws, "OUTPUT_COLUMN")
+    
+    ' Process data in chunks for scalability
+    Dim chunkStart As Long: chunkStart = 2
+    Dim chunkEnd As Long
+    
+    Do While chunkStart <= lr
+        chunkEnd = Application.Min(chunkStart + chunkSize - 1, lr)
+        
+        ' Your processing logic here using vDataArray
+        For i = chunkStart To chunkEnd
+            ' Process each row
+            ' Use NzLong, NzDouble, NzString for safe data access
+            ' Example:
+            ' Dim inputValue As String
+            ' inputValue = NzString(vDataArray, i, cInputCol)
+            ' ws.Cells(i, cOutputCol).Value = SomeTransformation(inputValue)
+        Next i
+        
+        ' Process DoEvents periodically to keep UI responsive
+        If (chunkStart - 2) Mod 1000 = 0 Then
+            DoEvents
+        End If
+        
+        chunkStart = chunkEnd + 1
+    Loop
+    
+    ' Record successful completion with duration
+    Dim duration As Double: duration = Timer - startTime
+    Log "Helper_XX_Template COMPLETED | Duration: " & Format(duration, "0.000") & "s", "SUCCESS"
+    Exit Sub
+
+ErrorHandler:
+    ' No silent errors - Use centralized error handling
+    g_ErrorHandler.LogError "Helper_XX_Template", "Main"
+    Dim errorDuration As Double: errorDuration = Timer - startTime
+    Log "Helper_XX_Template FAILED | Duration: " & Format(errorDuration, "0.000") & "s | Error: " & Err.Description, "ERROR"
+End Sub
+
+' Example of a fully implemented optimized helper function
+Private Sub Helper_01_SampleImplementation(ws As Worksheet)
+    ' Performance optimized helper function example
+    Dim startTime As Double: startTime = Timer
+    Dim lr As Long, lc As Long
+    Dim cPolicyNo As Long, cStatus As Long, cResult As Long
+    Dim vData As Variant
+    Dim i As Long
+    
+    On Error GoTo ErrorHandler
+    Log "Helper_01_SampleImplementation START"
+    
+    ' Validate inputs
+    If ws Is Nothing Then
+        Log "Helper_01_SampleImplementation ERROR: Worksheet is Nothing", "ERROR"
+        Exit Sub
+    End If
+    
+    ' Get required column indices
+    cPolicyNo = GetColumnIndex(ws, "POLICY_NO")
+    cStatus = GetColumnIndex(ws, "STATUS")
+    
+    If cPolicyNo = 0 Or cStatus = 0 Then
+        Log "Helper_01_SampleImplementation ERROR: Required columns not found", "ERROR"
+        Exit Sub
+    End If
+    
+    ' Get data dimensions
+    lr = GetLastRow(ws)
+    lc = GetLastColumn(ws)
+    
+    If lr < 2 Then
+        Log "Helper_01_SampleImplementation WARNING: No data to process", "WARNING"
+        Exit Sub
+    End If
+    
+    ' Add output column
+    AddColumn ws, "RESULT_FLAG"
+    cResult = GetColumnIndex(ws, "RESULT_FLAG")
+    
+    ' Read all data into memory array
+    vData = SafeArray2D(ws.Range(ws.Cells(1, 1), ws.Cells(lr, lc)).Value2)
+    
+    ' Process rows efficiently
+    For i = 2 To lr
+        ' Safe data access with automatic type conversion
+        Dim policyNo As String: policyNo = NzString(vData, i, cPolicyNo)
+        Dim status As String: status = NzString(vData, i, cStatus)
+        
+        ' Perform calculation
+        Dim result As String
+        If Len(policyNo) > 0 And status = "ACTIVE" Then
+            result = "QUALIFIED"
+        Else
+            result = "NOT_QUALIFIED"
+        End If
+        
+        ' Write result directly to worksheet
+        ws.Cells(i, cResult).Value = result
+        
+        ' Yield to UI periodically
+        If i Mod 1000 = 0 Then DoEvents
+    Next i
+    
+    ' Clean up
+    Erase vData
+    
+    ' Log completion
+    Dim duration As Double: duration = Timer - startTime
+    Log "Helper_01_SampleImplementation COMPLETED | Duration: " & Format(duration, "0.000") & "s", "SUCCESS"
+    Exit Sub
+
+ErrorHandler:
+    ' Centralized error handling
+    g_ErrorHandler.LogError "Helper_01_SampleImplementation", "Main"
+    Dim errorDuration As Double: errorDuration = Timer - startTime
+    Log "Helper_01_SampleImplementation FAILED | Duration: " & Format(errorDuration, "0.000") & "s | Error: " & Err.Description, "ERROR"
+End Sub
